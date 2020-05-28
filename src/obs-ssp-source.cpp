@@ -27,7 +27,7 @@ along with this program; If not, see <https://www.gnu.org/licenses/>
 #include <functional>
 #include <mutex>
 #include <obs-module.h>
-
+#include <obs.h>
 #include <util/platform.h>
 #include <util/threading.h>
 #include <chrono>
@@ -37,7 +37,7 @@ along with this program; If not, see <https://www.gnu.org/licenses/>
 #include "imf/ISspClient.h"
 #include "imf/threadloop.h"
 
-#include "controller/cameracontroller.h"
+#include "ssp-controller.h"
 
 extern "C" {
 #include "ffmpeg-decode.h"
@@ -45,6 +45,7 @@ extern "C" {
 
 #define PROP_SOURCE_IP "ssp_source_ip"
 #define PROP_CUSTOM_SOURCE_IP "ssp_custom_source_ip"
+#define PROP_CHECK_IP "ssp_check_ip"
 
 #define PROP_CUSTOM_VALUE "\x01\x02custom"
 
@@ -75,14 +76,18 @@ extern "C" {
 #define SSP_IP_WIFI "10.98.33.1"
 #define SSP_IP_USB "172.18.18.1"
 
-using namespace std::placeholders;
+#include <QThread>
 
+using namespace std::placeholders;
 
 struct ssp_source
 {
 	obs_source_t* source;
     imf::ThreadLoop *clientLooper;
     imf::ISspClient_class *client;
+    CameraStatus *cameraStatus;
+
+
     int sync_mode;
     int video_range;
     int hwaccel;
@@ -103,12 +108,10 @@ struct ssp_source
     uint32_t sample_size;
     AVCodecID aformat;
     obs_source_audio audio;
+
+    bool do_check;
 };
 
-static CameraController *getCameraController(){
-    static CameraController controller;
-    return &controller;
-}
 
 static void ssp_on_video_data(struct imf::SspH264Data *video, ssp_source *s)
 {
@@ -271,25 +274,20 @@ bool ssp_source_ip_modified(obs_properties_t *props,
     const char *source_ip = obs_data_get_string(settings, PROP_SOURCE_IP);
     if(strcmp(source_ip, PROP_CUSTOM_VALUE) == 0) {
         obs_property_t *custom_ip = obs_properties_get(props, PROP_CUSTOM_SOURCE_IP);
+        obs_property_t *check_ip = obs_properties_get(props, PROP_CHECK_IP);
         obs_property_set_visible(property, false);
         obs_property_set_visible(custom_ip, true);
+        obs_property_set_visible(check_ip, true);
         return true;
     }
 
     return true;
 }
 
-void http_resolution_mod(HttpResponse *rsp, obs_property_t *resolution, bool *ok) {
-    for (auto i: rsp->choices) {
-        blog(LOG_INFO, "%s", i.toStdString().c_str());
-        obs_property_list_add_string(resolution, i.toStdString().c_str(), i.toStdString().c_str());
-    }
-    *ok = true;
-}
-
-bool ssp_encoder_modified(obs_properties_t *props,
+bool ssp_encoder_modified(void* data, obs_properties_t *props,
                           obs_property_t *property,
                           obs_data_t *settings) {
+    auto s = (struct ssp_source*)data;
     const char *encoder = obs_data_get_string(settings, PROP_ENCODER);
     obs_property_t *resolution = obs_properties_get(props, PROP_RESOLUTION);
     obs_property_list_clear(resolution);
@@ -298,7 +296,6 @@ bool ssp_encoder_modified(obs_properties_t *props,
         obs_property_list_add_string(resolution, "4K-DCI", "4096*2160");
         obs_property_list_add_string(resolution, "1080p", "1920*1080");
     } else {
-        bool net_finish = false;
         const char *source_ip = obs_data_get_string(settings, PROP_SOURCE_IP);
         if (strcmp(source_ip, PROP_CUSTOM_VALUE) == 0) {
             source_ip = obs_data_get_string(settings, PROP_CUSTOM_SOURCE_IP);
@@ -306,16 +303,44 @@ bool ssp_encoder_modified(obs_properties_t *props,
         if (strcmp(source_ip, "") == 0) {
             return true;
         }
-        auto controller = getCameraController();
-        controller->setIp(source_ip);
-        controller->getCameraConfig(CONFIG_KEY_MOVIE_RESOLUTION, 2, std::bind(http_resolution_mod, _1, resolution, &net_finish));
-        uint64_t start_wait = os_gettime_ns()/1000000;
-        while (!net_finish && ((os_gettime_ns()/1000000) - start_wait) < 2000)
-            os_sleep_ms(500);
+        for(auto const &i : s->cameraStatus->resolutions) {
+            obs_property_list_add_string(resolution, i.toStdString().c_str(),i.toStdString().c_str());
+        }
 
     }
-
     return true;
+}
+
+static bool custom_ip_modify_callback(void* data, obs_properties_t *props,
+      obs_property_t *property,
+      obs_data_t *settings) {
+    auto s = (struct ssp_source*)data;
+    if(!s->do_check){
+        blog(LOG_INFO, "ip modified, no need to check.");
+        return false;
+    }
+    blog(LOG_INFO, "ip modified, need to check.");
+    auto ip = obs_data_get_string(settings, PROP_CUSTOM_SOURCE_IP);
+    if(strcmp(ip, "") == 0) {
+        return false;
+    }
+    s->cameraStatus->setIp(ip);
+    s->cameraStatus->getResolution([=](){
+        blog(LOG_INFO, "getResolutionOk");
+    });
+    s->do_check = false;
+    blog(LOG_INFO, "ip check queued.");
+    return true;
+}
+
+
+static bool check_ip_callback(obs_properties_t *props,
+                              obs_property_t *property, void *data){
+    auto s = (struct ssp_source*)data;
+    s->do_check = true;
+    auto custom_source_ip = obs_properties_get(props, PROP_CUSTOM_SOURCE_IP);
+    obs_source_update_properties(s->source);
+    return false;
 }
 
 obs_properties_t* ssp_source_getproperties(void* data)
@@ -362,9 +387,15 @@ obs_properties_t* ssp_source_getproperties(void* data)
         obs_module_text("SSPPlugin.SourceProps.SourceIp"),
         OBS_TEXT_DEFAULT);
 
+    obs_property_t* check_button = obs_properties_add_button2(props, PROP_CHECK_IP,
+       obs_module_text("SSPPlugin.SourceProps.CheckIp"),
+       check_ip_callback, data);
+
     obs_property_set_visible(custom_source_ip, false);
+    obs_property_set_visible(check_button, false);
 
     obs_property_set_modified_callback(source_ip, ssp_source_ip_modified);
+    obs_property_set_modified_callback2(custom_source_ip, custom_ip_modify_callback, data);
 
 	obs_property_t* sync_modes = obs_properties_add_list(props, PROP_SYNC,
 		obs_module_text("SSPPlugin.SourceProps.Sync"),
@@ -398,7 +429,7 @@ obs_properties_t* ssp_source_getproperties(void* data)
                                                        OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
     obs_property_list_add_string(encoders, "H264", "H264");
     obs_property_list_add_string(encoders, "H265", "H265");
-    obs_property_set_modified_callback(encoders, ssp_encoder_modified);
+    obs_property_set_modified_callback2(encoders, ssp_encoder_modified, data);
 
     obs_properties_add_bool(props, PROP_EXP_WAIT_I,
                             obs_module_text("SSPPlugin.SourceProps.WaitIFrame"));
@@ -492,6 +523,8 @@ void* ssp_source_create(obs_data_t* settings, obs_source_t* source)
 	auto s = (struct ssp_source*)bzalloc(sizeof(struct ssp_source));
 	s->source = source;
 	s->running = false;
+	s->do_check = false;
+	s->cameraStatus = new CameraStatus();
     ssp_source_update(s, settings);
 	return s;
 }
@@ -515,9 +548,11 @@ static void * thread_source_destory(void *data){
 
 void ssp_source_destroy(void* data)
 {
+    auto s = (struct ssp_source*)data;
     pthread_t thread;
     pthread_create(&thread, nullptr, thread_source_destory, data);
     pthread_detach(thread);
+    delete s->cameraStatus;
 }
 
 struct obs_source_info create_ssp_source_info()

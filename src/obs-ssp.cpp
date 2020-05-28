@@ -22,12 +22,11 @@ along with this program; If not, see <https://www.gnu.org/licenses/>
 #include <Windows.h>
 #endif
 
-#include <sys/stat.h>
 #include <obs-module.h>
 #include <util/platform.h>
-#include <pthread.h>
 
 #include "obs-ssp.h"
+#include "ssp-controller.h"
 
 OBS_DECLARE_MODULE()
 OBS_MODULE_AUTHOR("Yibai Zhang")
@@ -62,7 +61,7 @@ bool obs_module_load(void)
     blog(LOG_INFO, "libssp load successful!");
 
     create_mdns_loop();
-
+    initCameraController();
 	ssp_source_info = create_ssp_source_info();
 	obs_register_source(&ssp_source_info);
 	return true;
@@ -71,6 +70,7 @@ bool obs_module_load(void)
 void obs_module_unload()
 {
     stop_mdns_loop();
+    destroyCameraController();
 	blog(LOG_INFO, "goodbye !");
 }
 
