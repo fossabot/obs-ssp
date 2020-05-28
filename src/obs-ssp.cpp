@@ -40,7 +40,7 @@ create_loop_class_ptr create_loop_class;
 
 bool obs_module_load(void)
 {
-	blog(LOG_INFO, "hello ! (obs-ssp version %s) size: %d", OBS_SSP_VERSION, sizeof(ssp_source_info));
+	blog(LOG_INFO, "hello ! (obs-ssp version %s) size: %lu", OBS_SSP_VERSION, sizeof(ssp_source_info));
     void *ssp_handle = os_dlopen(LIBSSP_LIBRARY_NAME);
     if(!ssp_handle){
         blog(LOG_WARNING, "Load %s failed.", LIBSSP_LIBRARY_NAME);
@@ -61,7 +61,6 @@ bool obs_module_load(void)
     blog(LOG_INFO, "libssp load successful!");
 
     create_mdns_loop();
-    initCameraController();
 	ssp_source_info = create_ssp_source_info();
 	obs_register_source(&ssp_source_info);
 	return true;
@@ -70,7 +69,6 @@ bool obs_module_load(void)
 void obs_module_unload()
 {
     stop_mdns_loop();
-    destroyCameraController();
 	blog(LOG_INFO, "goodbye !");
 }
 

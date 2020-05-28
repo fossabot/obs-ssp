@@ -73,6 +73,9 @@ public:
 
     void getCameraConfig(const QString &key, int timeout, OnRequestCallback callback);
     void getCameraConfig(const QString &key, OnRequestCallback callback);
+    void setCameraConfig(const QString &key, const QString &value, OnRequestCallback callback);
+    void getInfo(OnRequestCallback callback);
+
     void requestForCode(const QString &shortPath, int timeout, OnRequestCallback callback);
     void requestForCode(const QString &shortPath, OnRequestCallback callback);
 

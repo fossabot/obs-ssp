@@ -5,22 +5,8 @@
 #include <QThread>
 #include "ssp-controller.h"
 
-static QThread *ccThread = nullptr;
-
-void initCameraController()  {
-    ccThread = new QThread();
-    ccThread->start(QThread::TimeCriticalPriority);
-}
-
-void destroyCameraController() {
-    ccThread->quit();
-    ccThread->wait();
-    delete ccThread;
-}
-
 CameraStatus::CameraStatus(){
     controller = new CameraController();
-    controller->moveToThread(ccThread);
 };
 
 void CameraStatus::setIp(const QString &ip) {
@@ -29,25 +15,142 @@ void CameraStatus::setIp(const QString &ip) {
 
 void CameraStatus::getResolution(const StatusUpdateCallback& callback) {
     controller->getCameraConfig(CONFIG_KEY_MOVIE_RESOLUTION,[=](HttpResponse *rsp) {
+        if(rsp->statusCode == 999 ) {
+            callback(false);
+            return false;
+        }
         if(rsp->choices.count() > 0) {
             resolutions.clear();
         }
         for (const auto& i: rsp->choices) {
             resolutions.push_back(i);
         }
-        callback();
+
+        current_framerate = rsp->currentValue;
+
+        callback(true);
+        return true;
     });
 }
 
 void CameraStatus::getFramerate(const StatusUpdateCallback& callback) {
-    controller->getCameraConfig(CONFIG_KEY_PROJECT_FPS, 3,[=](HttpResponse *rsp) {
+    controller->getCameraConfig(CONFIG_KEY_PROJECT_FPS, [=](HttpResponse *rsp) {
+        if(rsp->statusCode == 999 ) {
+            callback(false);
+            return false;
+        }
+
         if(rsp->choices.count() > 0) {
             framerates.clear();
         }
         for (const auto& i: rsp->choices) {
             framerates.push_back(i);
         }
-        callback();
+        current_framerate = rsp->currentValue;
+        callback(true);
+        return true;
+    });
+}
+
+void CameraStatus::getCurrentStream(const StatusUpdateCallback &callback) {
+    controller->getCameraConfig(CONFIG_KEY_SEND_STREAM, [=](HttpResponse *rsp) {
+        if(rsp->statusCode == 999 ) {
+            callback(false);
+            return false;
+        }
+        controller->getStreamInfo(rsp->currentValue, [=](HttpResponse *rsp) {
+            if(rsp->statusCode == 999 ) {
+                callback(false);
+                return false;
+            }
+            current_streamInfo = rsp->streamInfo;
+            callback(true);
+            return true;
+        });
+        return true;
+    });
+
+}
+
+void CameraStatus::refreshAll(const StatusUpdateCallback &callback) {
+    getInfo([=](bool ok){
+        callback(ok);
+        return ok;
+    });
+}
+
+void CameraStatus::getInfo(const StatusUpdateCallback &callback) {
+    controller->getInfo([=](HttpResponse *rsp){
+        if(rsp->statusCode == 999 ) {
+            callback(false);
+            return false;
+        }
+        model = rsp->currentValue;
+        callback(true);
+        return true;
+    });
+}
+
+void CameraStatus::setLed(bool isOn) {
+    controller->setCameraConfig(CONFIG_KEY_LED, isOn ? "On" : "Off", [=](HttpResponse *rsp){
+
+    });
+}
+
+void CameraStatus::setStream(int stream_index, QString resolution, QString fps, int bitrate, StatusUpdateCallback cb) {
+    bool need_downresolution = false;
+    if(model.contains(E2C_MODEL_CODE, Qt::CaseInsensitive)) {
+        if (resolution != "1920*1080" && fps.toDouble() > 30) {
+            return cb(false);
+        }
+        if(resolution == "1920*1080" && fps.toDouble() > 30) {
+            need_downresolution = true;
+        }
+    }
+    QString real_resolution;
+    QString width, height;
+    auto arr = resolution.split("*");
+    if(arr.size() < 2) {
+        return cb(false);
+    }
+    width = arr[0];
+    height = arr[1];
+    if(need_downresolution)
+        real_resolution = "1920x1080";
+    else if(resolution == "3840*2160" || resolution == "1920*1080")
+        real_resolution = "4K";
+    else if(resolution == "4096*2160")
+        real_resolution = "C4K";
+    else
+        return cb(false);
+
+    auto index = QString(stream_index);
+    auto bitrate2 = QString(bitrate);
+    controller->setCameraConfig(CONFIG_KEY_MOVIE_RESOLUTION, real_resolution, [=](HttpResponse *rsp){
+        if(rsp->statusCode != 200 || rsp->code != 0){
+            cb(false);
+        }
+        controller->setCameraConfig(CONFIG_KEY_PROJECT_FPS, fps, [=](HttpResponse *rsp){
+            if(rsp->statusCode != 200 || rsp->code != 0){
+                cb(false);
+            }
+            controller->setSendStream(index, [=](HttpResponse *rsp){
+                if(rsp->statusCode != 200 || rsp->code != 0){
+                    cb(false);
+                }
+                controller->setStreamBitrate(index, bitrate2, [=](HttpResponse *rsp){
+                    if(rsp->statusCode != 200 || rsp->code != 0){
+                        cb(false);
+                    }
+                    controller->setStreamResolution(index, width, height, [=](HttpResponse *rsp){
+                        if(rsp->statusCode != 200 || rsp->code != 0){
+                            cb(false);
+                        }
+                        cb(true);
+                    });
+                });
+            });
+        });
     });
 }
 

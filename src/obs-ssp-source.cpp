@@ -268,9 +268,10 @@ const char* ssp_source_getname(void* data)
 	return obs_module_text("SSPPlugin.SSPSourceName");
 }
 
-bool ssp_source_ip_modified(obs_properties_t *props,
-                                   obs_property_t *property,
-                                   obs_data_t *settings) {
+bool source_ip_modified(void* data, obs_properties_t *props,
+                        obs_property_t *property,
+                        obs_data_t *settings) {
+    auto s = (struct ssp_source*)data;
     const char *source_ip = obs_data_get_string(settings, PROP_SOURCE_IP);
     if(strcmp(source_ip, PROP_CUSTOM_VALUE) == 0) {
         obs_property_t *custom_ip = obs_properties_get(props, PROP_CUSTOM_SOURCE_IP);
@@ -280,35 +281,15 @@ bool ssp_source_ip_modified(obs_properties_t *props,
         obs_property_set_visible(check_ip, true);
         return true;
     }
-
-    return true;
-}
-
-bool ssp_encoder_modified(void* data, obs_properties_t *props,
-                          obs_property_t *property,
-                          obs_data_t *settings) {
-    auto s = (struct ssp_source*)data;
-    const char *encoder = obs_data_get_string(settings, PROP_ENCODER);
-    obs_property_t *resolution = obs_properties_get(props, PROP_RESOLUTION);
-    obs_property_list_clear(resolution);
-    if(strcmp(encoder, "H264") == 0){
-        obs_property_list_add_string(resolution, "4K-UHD", "3840*2160");
-        obs_property_list_add_string(resolution, "4K-DCI", "4096*2160");
-        obs_property_list_add_string(resolution, "1080p", "1920*1080");
-    } else {
-        const char *source_ip = obs_data_get_string(settings, PROP_SOURCE_IP);
-        if (strcmp(source_ip, PROP_CUSTOM_VALUE) == 0) {
-            source_ip = obs_data_get_string(settings, PROP_CUSTOM_SOURCE_IP);
-        }
-        if (strcmp(source_ip, "") == 0) {
-            return true;
-        }
-        for(auto const &i : s->cameraStatus->resolutions) {
-            obs_property_list_add_string(resolution, i.toStdString().c_str(),i.toStdString().c_str());
-        }
-
+    if(s->cameraStatus->getIp() == source_ip) {
+        return false;
     }
-    return true;
+    s->cameraStatus->setIp(source_ip);
+    s->cameraStatus->refreshAll([=](bool ok){
+        if(!ok) return;
+        obs_source_update_properties(s->source);
+    });
+    return false;
 }
 
 static bool custom_ip_modify_callback(void* data, obs_properties_t *props,
@@ -325,11 +306,36 @@ static bool custom_ip_modify_callback(void* data, obs_properties_t *props,
         return false;
     }
     s->cameraStatus->setIp(ip);
-    s->cameraStatus->getResolution([=](){
-        blog(LOG_INFO, "getResolutionOk");
+    s->cameraStatus->refreshAll([=](bool ok){
+        if(!ok) return;
+        blog(LOG_INFO, "refresh ok");
+        obs_source_update_properties(s->source);
     });
     s->do_check = false;
     blog(LOG_INFO, "ip check queued.");
+    return false;
+}
+
+static bool resolution_modify_callback(void* data, obs_properties_t *props,
+                                      obs_property_t *property,
+                                      obs_data_t *settings) {
+
+    auto s = (struct ssp_source*)data;
+    auto framerates = obs_properties_get(props, PROP_FRAME_RATE);
+    obs_property_list_clear(framerates);
+
+    if(s->cameraStatus->model.isEmpty()) {
+        return false;
+    }
+
+    auto resolution = obs_data_get_string(settings, PROP_RESOLUTION);
+    obs_property_list_add_string(framerates, "25 fps", "25");
+    obs_property_list_add_string(framerates, "30 fps", "29.97");
+    blog(LOG_INFO, "Camera model: %s", s->cameraStatus->model.toStdString().c_str());
+    if(strcmp(resolution, "1920*1080") != 0 || !s->cameraStatus->model.contains(E2C_MODEL_CODE, Qt::CaseInsensitive)) {
+        obs_property_list_add_string(framerates, "50 fps", "50");
+        obs_property_list_add_string(framerates, "60 fps", "59.94");
+    }
     return true;
 }
 
@@ -338,7 +344,6 @@ static bool check_ip_callback(obs_properties_t *props,
                               obs_property_t *property, void *data){
     auto s = (struct ssp_source*)data;
     s->do_check = true;
-    auto custom_source_ip = obs_properties_get(props, PROP_CUSTOM_SOURCE_IP);
     obs_source_update_properties(s->source);
     return false;
 }
@@ -394,7 +399,7 @@ obs_properties_t* ssp_source_getproperties(void* data)
     obs_property_set_visible(custom_source_ip, false);
     obs_property_set_visible(check_button, false);
 
-    obs_property_set_modified_callback(source_ip, ssp_source_ip_modified);
+    obs_property_set_modified_callback2(source_ip, source_ip_modified, data);
     obs_property_set_modified_callback2(custom_source_ip, custom_ip_modify_callback, data);
 
 	obs_property_t* sync_modes = obs_properties_add_list(props, PROP_SYNC,
@@ -429,14 +434,18 @@ obs_properties_t* ssp_source_getproperties(void* data)
                                                        OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
     obs_property_list_add_string(encoders, "H264", "H264");
     obs_property_list_add_string(encoders, "H265", "H265");
-    obs_property_set_modified_callback2(encoders, ssp_encoder_modified, data);
 
     obs_properties_add_bool(props, PROP_EXP_WAIT_I,
                             obs_module_text("SSPPlugin.SourceProps.WaitIFrame"));
 
-    obs_properties_add_list(props, PROP_RESOLUTION,
+    obs_property_t* resolutions = obs_properties_add_list(props, PROP_RESOLUTION,
                             obs_module_text("SSPPlugin.SourceProps.Resolution"),
                             OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
+    obs_property_list_add_string(resolutions, "4K-UHD", "3840*2160");
+    obs_property_list_add_string(resolutions, "4K-DCI", "4096*2160");
+    obs_property_list_add_string(resolutions, "1080p", "1920*1080");
+
+    obs_property_set_modified_callback2(resolutions, resolution_modify_callback, data);
 
     obs_properties_add_list(props, PROP_FRAME_RATE,
                             obs_module_text("SSPPlugin.SourceProps.FrameRate"),
@@ -490,21 +499,46 @@ void ssp_source_update(void* data, obs_data_t* settings)
 
     s->tally = obs_data_get_bool(settings, PROP_LED_TALLY);
 
-    blog(LOG_INFO, "Starting ssp client...");
-	s->clientLooper = new imf::ThreadLoop(std::bind(ssp_setup_client, _1, (ssp_source*)data), create_loop_class);
-	s->clientLooper->start();
-	s->running = true;
-    blog(LOG_INFO, "SSP client started.");
+    auto encoder = obs_data_get_string(settings, PROP_ENCODER);
+    auto resolution = obs_data_get_string(settings, PROP_RESOLUTION);
+    auto framerate = obs_data_get_string(settings, PROP_FRAME_RATE);
+    auto bitrate = obs_data_get_int(settings, PROP_BITRATE);
 
+    int stream_index;
+    if(strcmp(encoder, "H265") == 0) {
+        stream_index = 1;
+    } else {
+        stream_index = 0;
+    }
+
+    s->cameraStatus->setStream(stream_index, resolution, framerate, bitrate, [=](bool ok){
+        if(!ok)
+            return;
+
+        blog(LOG_INFO, "Starting ssp client...");
+        s->clientLooper = new imf::ThreadLoop(std::bind(ssp_setup_client, _1, (ssp_source*)data), create_loop_class);
+        s->clientLooper->start();
+        s->running = true;
+        blog(LOG_INFO, "SSP client started.");
+
+    });
 }
 
 void ssp_source_shown(void* data)
 {
+    auto s = (struct ssp_source*)data;
+    if(s->tally) {
+        s->cameraStatus->setLed(true);
+    }
     blog(LOG_INFO, "ssp source shown.\n");
 }
 
 void ssp_source_hidden(void* data)
 {
+    auto s = (struct ssp_source*)data;
+    if(s->tally) {
+        s->cameraStatus->setLed(false);
+    }
     blog(LOG_INFO, "ssp source hidden.\n");
 }
 

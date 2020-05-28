@@ -145,6 +145,17 @@ void CameraController::getCameraConfig(const QString &key, int timeout, OnReques
     commonRequest(req);
 }
 
+void CameraController::getInfo(OnRequestCallback callback) {
+    auto *req = new HttpRequest();
+    QString shortPath;
+    shortPath.append(URL_INFO);
+    req->useShortPath = true;
+    req->shortPath = shortPath;
+    req->reqType = RequestType::REQUEST_TYPE_INFO;
+    req->timeout = HTTP_COMMAND_TIMEOUT;
+    req->callback = callback;
+    commonRequest(req);
+}
 
 
 void CameraController::requestForCode(const QString &shortPath, OnRequestCallback callback) {
@@ -160,9 +171,12 @@ void CameraController::requestForCode(const QString &shortPath, int timeout, OnR
     req->callback = callback;
     commonRequest(req);
 }
-
-
-
+void CameraController::setCameraConfig(const QString &key, const QString &value, OnRequestCallback callback) {
+    QString shortPath;
+    // /ctrl/stream_setting?index=stream1&width=1920&height=1080
+    shortPath.append(URL_CTRL_SET).append("?").append(key).append(value);
+    requestForCode(shortPath, callback);
+}
 
 void CameraController::setSendStream(const QString & value, OnRequestCallback callback) {
     QString shortPath;
@@ -303,7 +317,8 @@ void CameraController::parseResponse(const QByteArray &byteData, struct HttpResp
         if (reqType == REQUEST_TYPE_CONFIG) {
             CameraConfig::parseForConfig(doc.object(), rsp);
         } else if (reqType == REQUEST_TYPE_INFO) {
-
+            rsp->code = 0;
+            rsp->currentValue = doc["model"].toString();
         } else if (reqType == REQUEST_TYPE_FILES) {
         } else if (reqType == REQUEST_TYPE_MEDIA_INFO) {
         } else if (reqType == REQUEST_TYPE_NETINFO) {
